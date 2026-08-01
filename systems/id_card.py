@@ -10,50 +10,20 @@ from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 
 WIB = ZoneInfo("Asia/Jakarta")
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATABASE_PATH = BASE_DIR / "data" / "arvelion.db"
-TEMPLATE_PATH = BASE_DIR / "assets" / "id_card_template.png"
-
-
-def get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ]
-    for candidate in candidates:
-        if Path(candidate).exists():
-            return ImageFont.truetype(candidate, size=size)
-    return ImageFont.load_default()
-
-
-def fit_font(text: str, max_width: int, start_size: int, minimum: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    for size in range(start_size, minimum - 1, -1):
-        font = get_font(size, bold)
-        if font.getlength(text) <= max_width:
-            return font
-    return get_font(minimum, bold)
-
-
-def shorten_text(font: ImageFont.FreeTypeFont | ImageFont.ImageFont, text: str, max_width: int) -> str:
-    value = str(text)
-    if font.getlength(value) <= max_width:
-        return value
-    while value and font.getlength(value + "...") > max_width:
-        value = value[:-1]
-    return (value + "...") if value else ""
-
-
-def draw_text(draw: ImageDraw.ImageDraw, position: tuple[int, int], text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont, fill: tuple[int, int, int], max_width: int | None = None) -> None:
-    value = shorten_text(font, text, max_width) if max_width is not None else str(text)
-    draw.text(position, value, font=font, fill=fill)
+FONT_DIR = BASE_DIR / "fonts"
 
 
 def get_config() -> dict[str, str]:
+    description = os.getenv(
+        "ARVELION_ID_PANEL_DESCRIPTION",
+        "Buat identitas komunitas kamu melalui tombol di bawah.\\n\\n**Buat ID** untuk mengisi atau memperbarui data.\\n**Lihat ID Saya** untuk menampilkan kartu milikmu.",
+    ).strip()
     return {
         "community_name": os.getenv("ARVELION_ID_COMMUNITY_NAME", "ARVELION COMMUNITY").strip() or "ARVELION COMMUNITY",
         "bot_label": os.getenv("ARVELION_ID_BOT_LABEL", "ARVELION BOT").strip() or "ARVELION BOT",
@@ -62,11 +32,74 @@ def get_config() -> dict[str, str]:
         "member_label": os.getenv("ARVELION_ID_MEMBER_LABEL", "MEMBER").strip() or "MEMBER",
         "sid_prefix": os.getenv("ARVELION_ID_SID_PREFIX", "ARV").strip() or "ARV",
         "panel_title": os.getenv("ARVELION_ID_PANEL_TITLE", "Arvelion ID Card").strip() or "Arvelion ID Card",
-        "panel_description": (os.getenv("ARVELION_ID_PANEL_DESCRIPTION", "Buat identitas komunitas kamu melalui tombol di bawah.\n\n**Buat ID** untuk mengisi atau memperbarui data.\n**Lihat ID Saya** untuk menampilkan kartu milikmu.").strip() or "Buat identitas komunitas kamu melalui tombol di bawah.\n\n**Buat ID** untuk mengisi atau memperbarui data.\n**Lihat ID Saya** untuk menampilkan kartu milikmu.").replace("\\n", "\n"),
+        "panel_description": (description or "Buat identitas komunitas kamu melalui tombol di bawah.").replace("\\n", "\n"),
+        "font_regular": os.getenv("ARVELION_ID_FONT_REGULAR", "fonts/Arvelion-Regular.ttf").strip(),
+        "font_bold": os.getenv("ARVELION_ID_FONT_BOLD", "fonts/Arvelion-Bold.ttf").strip(),
     }
 
 
-def create_avatar(avatar_bytes: bytes | None, size: int, fallback: str) -> Image.Image:
+def resolve_font_path(configured: str, bold: bool) -> Path | None:
+    candidates: list[Path] = []
+    if configured:
+        configured_path = Path(configured)
+        candidates.append(configured_path if configured_path.is_absolute() else BASE_DIR / configured_path)
+    candidates.extend(
+        [
+            FONT_DIR / ("Arvelion-Bold.ttf" if bold else "Arvelion-Regular.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"),
+            Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def get_font(size: int, bold: bool, config: dict[str, str]) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    path = resolve_font_path(config["font_bold"] if bold else config["font_regular"], bold)
+    if path:
+        return ImageFont.truetype(str(path), size=size)
+    return ImageFont.load_default()
+
+
+def fit_font(text: str, max_width: int, start_size: int, minimum: int, bold: bool, config: dict[str, str]) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for size in range(start_size, minimum - 1, -1):
+        font = get_font(size, bold, config)
+        if font.getlength(text) <= max_width:
+            return font
+    return get_font(minimum, bold, config)
+
+
+def truncate(font: ImageFont.FreeTypeFont | ImageFont.ImageFont, text: str, max_width: int) -> str:
+    value = str(text)
+    if font.getlength(value) <= max_width:
+        return value
+    while value and font.getlength(value + "...") > max_width:
+        value = value[:-1]
+    return value + "..." if value else ""
+
+
+def vertical_gradient(size: tuple[int, int], top: tuple[int, int, int], bottom: tuple[int, int, int]) -> Image.Image:
+    width, height = size
+    image = Image.new("RGB", size)
+    pixels = image.load()
+    for y in range(height):
+        ratio = y / max(height - 1, 1)
+        color = tuple(int(top[index] + (bottom[index] - top[index]) * ratio) for index in range(3))
+        for x in range(width):
+            pixels[x, y] = color
+    return image.convert("RGBA")
+
+
+def rounded_mask(size: tuple[int, int], radius: int) -> Image.Image:
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius=radius, fill=255)
+    return mask
+
+
+def create_avatar(avatar_bytes: bytes | None, size: int, fallback: str, config: dict[str, str]) -> Image.Image:
     if avatar_bytes:
         try:
             avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
@@ -75,133 +108,176 @@ def create_avatar(avatar_bytes: bytes | None, size: int, fallback: str) -> Image
             top = (avatar.height - side) // 2
             avatar = avatar.crop((left, top, left + side, top + side)).resize((size, size), Image.Resampling.LANCZOS)
         except Exception:
-            avatar = Image.new("RGBA", (size, size), (34, 47, 82, 255))
+            avatar = vertical_gradient((size, size), (25, 50, 105), (8, 20, 52))
     else:
-        avatar = Image.new("RGBA", (size, size), (34, 47, 82, 255))
+        avatar = vertical_gradient((size, size), (25, 50, 105), (8, 20, 52))
 
     if not avatar_bytes:
-        avatar_draw = ImageDraw.Draw(avatar)
         initials = "".join(part[0] for part in fallback.split()[:2] if part).upper() or "A"
-        font = fit_font(initials, size - 40, size // 3, 26, True)
-        box = avatar_draw.textbbox((0, 0), initials, font=font)
-        avatar_draw.text(((size - (box[2] - box[0])) / 2, (size - (box[3] - box[1])) / 2 - 6), initials, font=font, fill=(242, 246, 255))
+        draw = ImageDraw.Draw(avatar)
+        font = fit_font(initials, size - 50, size // 3, 26, True, config)
+        box = draw.textbbox((0, 0), initials, font=font)
+        draw.text(
+            ((size - (box[2] - box[0])) / 2, (size - (box[3] - box[1])) / 2 - 6),
+            initials,
+            font=font,
+            fill=(242, 247, 255),
+        )
 
-    mask = Image.new("L", (size, size), 0)
-    mask_draw = ImageDraw.Draw(mask)
-    mask_draw.rounded_rectangle((0, 0, size, size), radius=48, fill=255)
-    avatar.putalpha(mask)
+    avatar.putalpha(rounded_mask((size, size), 45))
     return avatar
 
 
-def block(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], fill: tuple[int, int, int, int], radius: int = 0) -> None:
-    if radius > 0:
-        draw.rounded_rectangle(box, radius=radius, fill=fill)
-    else:
-        draw.rectangle(box, fill=fill)
+def draw_glow_rect(image: Image.Image, box: tuple[int, int, int, int], radius: int, color: tuple[int, int, int], width: int = 3, blur: int = 16) -> None:
+    glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    glow_draw.rounded_rectangle(box, radius=radius, outline=(*color, 210), width=max(width * 3, 8))
+    glow = glow.filter(ImageFilter.GaussianBlur(blur))
+    image.alpha_composite(glow)
+    ImageDraw.Draw(image).rounded_rectangle(box, radius=radius, outline=(*color, 255), width=width)
+
+
+def draw_logo(draw: ImageDraw.ImageDraw, x: int, y: int, scale: float = 1.0) -> None:
+    blue = (65, 128, 255)
+    light = (106, 166, 255)
+    dark = (25, 75, 190)
+    points_left = [(x, y + int(92 * scale)), (x + int(42 * scale), y), (x + int(68 * scale), y + int(20 * scale)), (x + int(25 * scale), y + int(100 * scale))]
+    points_right = [(x + int(48 * scale), y + int(44 * scale)), (x + int(88 * scale), y + int(106 * scale)), (x + int(58 * scale), y + int(91 * scale)), (x + int(35 * scale), y + int(58 * scale))]
+    draw.polygon(points_left, fill=light)
+    draw.polygon(points_right, fill=blue)
+    draw.polygon([(x + int(31 * scale), y + int(58 * scale)), (x + int(51 * scale), y + int(28 * scale)), (x + int(58 * scale), y + int(42 * scale)), (x + int(43 * scale), y + int(66 * scale))], fill=dark)
+
+
+def draw_robot(draw: ImageDraw.ImageDraw, x: int, y: int) -> None:
+    blue = (61, 122, 255)
+    draw.rounded_rectangle((x, y + 7, x + 54, y + 48), radius=12, outline=blue, width=3)
+    draw.line((x + 27, y, x + 27, y + 8), fill=blue, width=3)
+    draw.ellipse((x + 23, y - 5, x + 31, y + 3), fill=blue)
+    draw.ellipse((x + 13, y + 21, x + 20, y + 28), fill=blue)
+    draw.ellipse((x + 34, y + 21, x + 41, y + 28), fill=blue)
+    draw.arc((x + 17, y + 25, x + 38, y + 40), start=10, end=170, fill=blue, width=2)
 
 
 def render_card(data: dict[str, Any], member: discord.Member, avatar_bytes: bytes | None, config: dict[str, str]) -> io.BytesIO:
-    if TEMPLATE_PATH.exists():
-        image = Image.open(TEMPLATE_PATH).convert("RGBA")
-    else:
-        image = Image.new("RGBA", (1672, 941), (4, 11, 26, 255))
+    width = 1672
+    height = 941
+    image = vertical_gradient((width, height), (3, 10, 25), (1, 6, 17))
+
+    ambient = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    ambient_draw = ImageDraw.Draw(ambient)
+    ambient_draw.ellipse((-250, -280, 760, 620), fill=(20, 70, 210, 70))
+    ambient_draw.ellipse((970, 250, 1880, 1120), fill=(0, 45, 170, 55))
+    ambient = ambient.filter(ImageFilter.GaussianBlur(120))
+    image.alpha_composite(ambient)
+
     draw = ImageDraw.Draw(image)
+    outer_box = (31, 32, width - 31, height - 35)
+    draw_glow_rect(image, outer_box, 35, (48, 108, 255), 3, 18)
 
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    dark_fill = (5, 13, 32, 240)
-    dark_fill_soft = (7, 15, 36, 230)
+    header_box = (52, 50, 1620, 210)
+    draw.rounded_rectangle(header_box, radius=34, fill=(5, 13, 33, 235), outline=(41, 94, 208), width=2)
+    draw.line((56, 211, 1598, 211), fill=(42, 113, 255), width=2)
+    draw_logo(draw, 92, 78, 0.9)
 
-    block(overlay_draw, (88, 257, 465, 693), dark_fill_soft, 38)
-    for box in [
-        (217, 100, 706, 183),
-        (1274, 96, 1533, 182),
-        (761, 244, 1225, 696),
-        (1316, 283, 1498, 422),
-        (1310, 485, 1498, 537),
-        (1310, 596, 1498, 648),
-        (215, 774, 505, 848),
-        (666, 768, 1114, 849),
-        (1194, 766, 1545, 849),
-    ]:
-        block(overlay_draw, box, dark_fill, 20)
-
-    row_cover_boxes = [
-        (733, 244, 1010, 313),
-        (733, 316, 1108, 390),
-        (733, 394, 1108, 469),
-        (733, 475, 1108, 545),
-        (733, 556, 1160, 624),
-        (733, 633, 1160, 698),
-    ]
-    for box in row_cover_boxes:
-        block(overlay_draw, box, dark_fill)
-
-    image.alpha_composite(overlay)
-
-    title_left, title_top = 238, 89
-    title = config["card_title"].strip() or "ARVELION ID CARD"
-    if "ID CARD" in title.upper():
-        prefix = title.upper().split("ID CARD")[0].rstrip()
-        left_text = prefix if prefix else "ARVELION"
-        gap = 12
-        left_font = fit_font(left_text, 420, 60, 36, True)
-        draw.text((title_left, title_top), left_text, font=left_font, fill=(239, 242, 248))
-        left_width = int(left_font.getlength(left_text))
-        draw.text((title_left + left_width + gap, title_top), "ID CARD", font=fit_font("ID CARD", 310, 58, 36, True), fill=(61, 122, 255))
+    title = config["card_title"].upper()
+    if "ID CARD" in title:
+        left = title.replace("ID CARD", "").strip() or "ARVELION"
+        left_font = fit_font(left, 430, 61, 36, True, config)
+        id_font = fit_font("ID CARD", 310, 58, 36, True, config)
+        draw.text((235, 82), left, font=left_font, fill=(239, 243, 252))
+        draw.text((235 + int(left_font.getlength(left)) + 15, 82), "ID CARD", font=id_font, fill=(61, 122, 255))
     else:
-        draw.text((title_left, title_top), shorten_text(fit_font(title, 600, 60, 36, True), title, 600), font=fit_font(title, 600, 60, 36, True), fill=(239, 242, 248))
-    draw.text((237, 160), shorten_text(get_font(27, False), config["card_subtitle"], 640), font=get_font(27, False), fill=(135, 156, 209))
-    bot_label_font = fit_font(config["bot_label"], 270, 37, 18, True)
-    draw.text((1322, 105), shorten_text(bot_label_font, config["bot_label"], 240), font=bot_label_font, fill=(242, 245, 251))
+        title_font = fit_font(title, 750, 58, 34, True, config)
+        draw.text((235, 82), truncate(title_font, title, 750), font=title_font, fill=(239, 243, 252))
 
-    avatar = create_avatar(avatar_bytes, 309, member.display_name)
-    image.alpha_composite(avatar, (95, 271))
+    subtitle_font = fit_font(config["card_subtitle"].upper(), 720, 27, 16, False, config)
+    draw.text((237, 157), truncate(subtitle_font, config["card_subtitle"].upper(), 720), font=subtitle_font, fill=(137, 157, 207))
 
-    label_font = get_font(28, True)
-    value_font = get_font(33, True)
-    label_color = (147, 163, 211)
-    value_color = (245, 247, 251)
+    bot_box = (1175, 84, 1562, 177)
+    draw.rounded_rectangle(bot_box, radius=28, fill=(5, 13, 33, 220), outline=(36, 85, 185), width=2)
+    draw_robot(draw, 1220, 105)
+    bot_font = fit_font(config["bot_label"].upper(), 255, 34, 18, True, config)
+    draw.text((1300, 115), truncate(bot_font, config["bot_label"].upper(), 245), font=bot_font, fill=(242, 245, 252))
+
+    avatar_box = (82, 249, 482, 704)
+    draw.rounded_rectangle(avatar_box, radius=48, fill=(4, 13, 34, 245))
+    draw_glow_rect(image, avatar_box, 48, (61, 122, 255), 3, 16)
+    avatar = create_avatar(avatar_bytes, 330, member.display_name, config)
+    image.alpha_composite(avatar, (117, 311))
+
+    label_color = (143, 161, 207)
+    value_color = (244, 247, 253)
     blue = (61, 122, 255)
-
+    label_font = get_font(27, True, config)
+    value_font = get_font(34, True, config)
     rows = [
-        ("SID NO", data["sid"], 275),
-        ("NAMA", data["name"], 352),
-        ("JENIS KELAMIN", data["gender"], 431),
-        ("DOMISILI", data["domicile"], 510),
-        ("CITA-CITA", data["aspiration"], 590),
-        ("HOBI", data["hobby"], 670),
+        ("SID NO", data["sid"]),
+        ("NAMA", data["name"]),
+        ("JENIS KELAMIN", data["gender"]),
+        ("DOMISILI", data["domicile"]),
+        ("CITA-CITA", data["aspiration"]),
+        ("HOBI", data["hobby"]),
     ]
-    for label, value, y in rows:
-        draw.text((523, y), label, font=label_font, fill=label_color)
-        draw.text((727, y - 2), ":", font=get_font(34, True), fill=blue)
-        chosen_font = fit_font(str(value), 460, 34, 19, True)
-        draw.text((763, y - 2), shorten_text(chosen_font, str(value), 440), font=chosen_font, fill=value_color)
+    row_x = 530
+    value_x = 770
+    row_y = 270
+    for label, value in rows:
+        draw.text((row_x, row_y), label, font=label_font, fill=label_color)
+        draw.text((731, row_y - 2), ":", font=get_font(35, True, config), fill=blue)
+        chosen = fit_font(str(value), 455, 34, 18, True, config)
+        draw.text((value_x, row_y - 2), truncate(chosen, str(value), 455), font=chosen, fill=value_color)
+        draw.line((row_x, row_y + 53, 1240, row_y + 53), fill=(33, 57, 105), width=2)
+        row_y += 78
 
     joined_at = member.joined_at.astimezone(WIB).strftime("%d-%m-%Y") if member.joined_at else "Tidak diketahui"
     created_at = datetime.fromisoformat(data["created_at"]).astimezone(WIB).strftime("%d-%m-%Y")
     account_created = member.created_at.astimezone(WIB).strftime("%d-%m-%Y")
 
-    draw.text((1381, 283), shorten_text(get_font(25, True), config["member_label"].upper(), 120), font=get_font(25, True), fill=blue)
-    right_name_font = fit_font(member.display_name, 172, 27, 18, True)
-    draw.text((1319, 354), shorten_text(right_name_font, member.display_name, 172), font=right_name_font, fill=value_color)
-    right_user_font = fit_font(f"@{member.name}", 170, 21, 15, False)
-    draw.text((1322, 414), shorten_text(right_user_font, f"@{member.name}", 170), font=right_user_font, fill=(169, 184, 223))
-    draw.text((1370, 502), "JOIN SERVER", font=get_font(18, True), fill=blue)
-    draw.text((1372, 542), joined_at, font=get_font(28, True), fill=value_color)
-    draw.text((1370, 610), "ID DIBUAT", font=get_font(18, True), fill=blue)
-    draw.text((1372, 650), created_at, font=get_font(28, True), fill=value_color)
+    member_box = (1280, 244, 1572, 703)
+    draw.rounded_rectangle(member_box, radius=43, fill=(5, 13, 33, 238))
+    draw_glow_rect(image, member_box, 43, (61, 122, 255), 3, 15)
+    draw.ellipse((1324, 286, 1344, 306), fill=blue)
+    draw.ellipse((1348, 286, 1368, 306), fill=blue)
+    draw.rounded_rectangle((1322, 307, 1370, 331), radius=10, fill=blue)
+    member_label_font = fit_font(config["member_label"].upper(), 150, 26, 17, True, config)
+    draw.text((1382, 286), truncate(member_label_font, config["member_label"].upper(), 145), font=member_label_font, fill=blue)
+    name_font = fit_font(member.display_name, 230, 28, 16, True, config)
+    draw.text((1321, 350), truncate(name_font, member.display_name, 225), font=name_font, fill=value_color)
+    username = f"@{member.name}"
+    username_font = fit_font(username, 225, 23, 15, False, config)
+    draw.text((1322, 399), truncate(username_font, username, 225), font=username_font, fill=(165, 181, 220))
+    draw.line((1322, 458, 1530, 458), fill=(45, 96, 210), width=2)
+    draw.text((1345, 494), "JOIN SERVER", font=get_font(18, True, config), fill=blue)
+    draw.text((1345, 533), joined_at, font=get_font(27, True, config), fill=value_color)
+    draw.line((1322, 575, 1530, 575), fill=(28, 54, 105), width=2)
+    draw.text((1345, 610), "ID DIBUAT", font=get_font(18, True, config), fill=blue)
+    draw.text((1345, 649), created_at, font=get_font(27, True, config), fill=value_color)
 
-    draw.text((221, 787), "AKUN DIBUAT", font=get_font(18, True), fill=blue)
-    draw.text((220, 828), account_created, font=get_font(28, True), fill=value_color)
-    draw.text((667, 787), "DISCORD ID", font=get_font(18, True), fill=blue)
-    discord_id_font = fit_font(str(member.id), 370, 27, 18, False)
-    draw.text((667, 828), shorten_text(discord_id_font, str(member.id), 370), font=discord_id_font, fill=value_color)
-    community_font = fit_font(config["community_name"].upper(), 330, 23, 15, True)
-    draw.text((1274, 803), shorten_text(community_font, config["community_name"].upper(), 310), font=community_font, fill=blue)
+    footer_box = (70, 747, 1600, 864)
+    draw.rounded_rectangle(footer_box, radius=34, fill=(5, 13, 33, 238), outline=(32, 76, 165), width=2)
+    draw.ellipse((118, 777, 177, 836), outline=blue, width=3)
+    draw.rounded_rectangle((133, 790, 162, 818), radius=4, outline=blue, width=3)
+    draw.line((138, 785, 138, 797), fill=blue, width=3)
+    draw.line((157, 785, 157, 797), fill=blue, width=3)
+    draw.text((208, 773), "AKUN DIBUAT", font=get_font(17, True, config), fill=blue)
+    draw.text((208, 811), account_created, font=get_font(28, True, config), fill=value_color)
+    draw.line((510, 771, 510, 839), fill=(32, 67, 135), width=2)
+
+    draw.ellipse((555, 777, 614, 836), outline=blue, width=3)
+    draw.arc((568, 792, 602, 819), start=200, end=340, fill=blue, width=4)
+    draw.ellipse((570, 795, 577, 802), fill=blue)
+    draw.ellipse((592, 795, 599, 802), fill=blue)
+    draw.text((643, 773), "DISCORD ID", font=get_font(17, True, config), fill=blue)
+    id_font = fit_font(str(member.id), 400, 28, 18, False, config)
+    draw.text((643, 811), truncate(id_font, str(member.id), 400), font=id_font, fill=value_color)
+    draw.line((1110, 771, 1110, 839), fill=(32, 67, 135), width=2)
+
+    draw_logo(draw, 1162, 779, 0.55)
+    community_font = fit_font(config["community_name"].upper(), 350, 24, 15, True, config)
+    draw.text((1232, 801), truncate(community_font, config["community_name"].upper(), 335), font=community_font, fill=blue)
 
     output = io.BytesIO()
-    image.save(output, format="PNG", optimize=True)
+    image.convert("RGB").save(output, format="PNG", optimize=True, quality=95)
     output.seek(0)
     return output
 
@@ -359,7 +435,12 @@ class IDCardModal(discord.ui.Modal, title="Isi Data Arvelion ID"):
         }
 
         try:
-            data, created = await self.cog.database.save_card(interaction.guild.id, interaction.user.id, values, self.cog.config["sid_prefix"])
+            data, created = await self.cog.database.save_card(
+                interaction.guild.id,
+                interaction.user.id,
+                values,
+                self.cog.config["sid_prefix"],
+            )
             file = await self.cog.build_file(data, interaction.user)
             embed = self.cog.result_embed(interaction.user, created)
             embed.set_image(url=f"attachment://{file.filename}")
